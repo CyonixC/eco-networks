@@ -2,6 +2,7 @@ import time
 # import asyncio
 import random
 import queue
+from Router import OSPFRouter
 
 class Link:
     def __init__(self, bandwidth, delay = 0, loss_rate = 0) -> None:
@@ -188,6 +189,6 @@ class EcoRPLink(Link):
             loss_rate (int, optional): loss rate of link, not used. Defaults to 0.
         """
         super().__init__(bandwidth, delay, loss_rate)
-        self.default_cost = 1000_000 / bandwidth
+        self.default_cost = OSPFRouter.link_cost(bandwidth)
         self.beta = beta
     

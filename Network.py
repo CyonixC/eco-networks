@@ -7,7 +7,7 @@ class Network:
         self.nodes = []
         self.links = []
         self.interfaces_active = {}
-        self.throughput_energy_constant = 0.0000001
+        self.throughput_energy_constant = 0.000_000_1
         self.active_interface_constant = 10
         self.idle_interface_constant = 8
         self.sleep_interface_constant = 0.16
@@ -27,6 +27,7 @@ class Network:
             interval (int, optional): Polling interval. Defaults to 1.
         """
         self.energy_record = []
+        self.drop_record = []
         self._monitoring_loop = asyncio.ensure_future(self.monitor(interval))
     
     async def monitor(self, interval=1):
@@ -76,7 +77,7 @@ class Network:
         for node in self.nodes:
             network_state.add_node(node.router_id)
         for link in self.links:
-            network_state.add_edge(link.terminal1.router_id, link.terminal2.router_id, cost=OSPFRouter.link_cost(link.bandwidth), active=link.active)
+            network_state.add_edge(link.terminal1.router_id, link.terminal2.router_id, cost=OSPFRouter.link_cost(link.bandwidth), capacity=link.bandwidth, active=link.active)
         
         return network_state
     
@@ -212,6 +213,7 @@ class EcoRPNetwork(Network):
         self.beta = beta
         self.lookback = lookback
         self.sleep_threshold = sleep_threshold
+        self.max_cost = 1
 
     def add_access_node(self, node):
         """Add an access node to the network.
@@ -221,6 +223,16 @@ class EcoRPNetwork(Network):
         """
         super().add_node(node)
         self.access_nodes.append(node)
+
+    def add_link(self, link):
+        if OSPFRouter.link_cost(link.bandwidth) > self.max_cost:
+            self.max_cost = OSPFRouter.link_cost(link.bandwidth)
+            for l in self.links:
+                l.default_cost = OSPFRouter.link_cost(l.bandwidth) / self.max_cost
+        
+        link.default_cost = OSPFRouter.link_cost(link.bandwidth) / self.max_cost
+
+        return super().add_link(link)
     
     def get_network_state(self):
         """Create a map of the current network state, including inactive links.
@@ -242,9 +254,9 @@ class EcoRPNetwork(Network):
             id2 = network_state.nodes[link.terminal2.router_id]['id_']
 
             if id2 % 2 == 0:
-                link_cost = self.adjust_cost(link.default_cost, -self.alpha) # negative alpha
+                link_cost = self.adjust_cost(link.default_cost, self.alpha, False) # negative alpha
             else:
-                link_cost = self.adjust_cost(link.default_cost, self.alpha)  # positive alpha
+                link_cost = self.adjust_cost(link.default_cost, self.alpha, True)  # positive alpha
 
             network_state.add_edge(link.terminal1.router_id, link.terminal2.router_id, cost=link_cost, active=link.active)
         
@@ -262,7 +274,7 @@ class EcoRPNetwork(Network):
     #             graph.remove_node(node.router_id)
     #     return graph
 
-    def adjust_cost(self, cost, alpha):
+    def adjust_cost(self, cost, alpha, odd):
         """Adjust the cost of a link based on the overall traffic history"""
 
         # Take the last lookback number of traffic rates
@@ -279,7 +291,25 @@ class EcoRPNetwork(Network):
         y_mean = sum(y) / n
         try:
             slr = sum([(x[i] - x_mean) * (y[i] - y_mean) for i in range(n)]) / sum([(x[i] - x_mean)**2 for i in range(n)])
-            return cost + alpha * slr
+            if slr >= 0 and not odd:
+                # Trending upwards, even node
+                return max(cost - alpha * slr, cost)
+
+            elif slr >= 0 and odd:
+                # Trending upwards, odd node
+                return min(cost + alpha * slr, cost)
+
+            elif slr < 0 and not odd:
+                # Trending downwards, even node
+                new_cost = cost + alpha * slr, cost
+            
+            elif slr < 0 and odd:
+                # Trending downwards, odd node
+                new_cosst = cost - alpha * slr, cost
+            
+            return min(1, max(2 * cost - 1, new_cost))
+                
+
         except ZeroDivisionError:
             return cost
 
