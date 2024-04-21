@@ -1,5 +1,3 @@
-import networkx as nx
-
 class Packet:
     def __init__(self, length, content) -> None:
         self.length = length    # dummy length
