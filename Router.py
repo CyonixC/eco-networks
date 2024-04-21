@@ -261,6 +261,47 @@ class OSPFRouter(Router):
         # cost is inversely proportional to bandwidth
         return 1_000_000 / bandwidth
 
+class EcoRouter(OSPFRouter):
+    def __init__(self, id, n_interfaces):
+        super().__init__(id, n_interfaces)
+        self.active = True # Eco-router sleep status for Eco-RP
+        self.state_switches = 0
+
+    def update_router_status(self):
+        """Update the status of this router based on the activity rates of its links. If all links are inactive, put the router to sleep."""
+        self.update_interface_statuses()
+        if self.interface_status.count(self.ACTIVE) == 0:
+            self.put_sleep()
+        else:
+            self.awake()
+
+    def get_status_switches(self, reset = True):
+        """Get the number of router state switches that have occurred on this router since the previous reset.
+
+        Args:
+            reset (bool, optional): Whether or not to reset the switch count. Defaults to True.
+
+        Returns:
+            int: number of switches
+        """
+        switches = self.state_switches
+        if reset:
+            self.state_switches = 0
+        return switches
+
+    def put_sleep(self):
+        if not self.active:
+            return
+        self.state_switches += 1
+        self.active = False
+
+
+    def awake(self):
+        if self.active:
+            return
+        self.state_switches += 1
+        self.active = True
+
 class GOSPFRouter(OSPFRouter):
     def __init__(self, router_id: str, n_interfaces: int, upper_threshold = 0.8, lower_threshold = 0.2) -> None:
         """Class to handle GOSPF routers. These routers are capable of switching interfaces based on the activity rate of the links.

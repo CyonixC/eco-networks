@@ -12,6 +12,8 @@ class Network:
         self.idle_interface_constant = 8
         self.sleep_interface_constant = 0.16
         self.swap_state_constant = 20
+        self.active_router_constant = 30
+        self.router_switch_constant = 60
         self.link_states = {}
         self.network_state = nx.Graph()
         self._monitoring_loop = None
@@ -36,7 +38,6 @@ class Network:
         while True:
             self.energy_record.append(self.get_total_energy())
             self.drop_record.append(self.get_dropped_packets())
-            print(self.energy_record)
             await asyncio.sleep(interval)
         
     def stop_monitoring(self):
@@ -137,6 +138,17 @@ class Network:
             elif activity == OSPFRouter.SLEEP: sum_ += self.sleep_interface_constant
         return sum_
     
+    def calculate_router_energy(self):
+        """Get total energy consumption of all routers in the network.
+
+        Returns:
+            int: total energy consumption of all routers
+        """
+        sum_ = 0
+        for _ in self.nodes:
+            sum_ += self.active_router_constant
+        return sum_
+    
     def get_dropped_packets(self):
         """Get the total number of dropped packets in the network.
 
@@ -147,7 +159,7 @@ class Network:
         for link in self.links:
             sum_ += link.sample_dropped_packets()
         return sum_
-
+    
     def get_total_energy(self, reset_activity=True):
         """Get the total energy consumption of the whole network.
 
@@ -160,7 +172,8 @@ class Network:
         self.update_interface_states()
         throughput_energy = self.throughput_energy_constant * self.get_total_throughput(reset_activity)
         interface_energy = self.calculate_interface_energy()
-        return throughput_energy + interface_energy
+        router_energy = self.calculate_router_energy()
+        return throughput_energy + interface_energy + router_energy
 
 class GOSPFNetwork(Network):
     def __init__(self) -> None:
@@ -189,3 +202,143 @@ class GOSPFNetwork(Network):
             self.energy_record.append(self.get_total_energy())
             self.drop_record.append(self.get_dropped_packets())
             await asyncio.sleep(interval)
+
+class EcoRPNetwork(Network):
+    def __init__(self, lookback=5, sleep_threshold = 0.01, alpha=0.3, beta = 0.8) -> None:
+        super().__init__()
+        self.access_nodes = []
+        self.utilisation_record = []
+        self.alpha = alpha
+        self.beta = beta
+        self.lookback = lookback
+        self.sleep_threshold = sleep_threshold
+
+    def add_access_node(self, node):
+        """Add an access node to the network.
+
+        Args:
+            node (Router): new access node
+        """
+        super().add_node(node)
+        self.access_nodes.append(node)
+    
+    def get_network_state(self):
+        """Create a map of the current network state, including inactive links.
+
+        Returns:
+            nx.Graph: graph representing the network state
+        """
+        network_state = nx.Graph()
+        for i, node in enumerate(self.nodes):
+            network_state.add_node(node.router_id, id_=i)
+        for link in self.links:
+
+            if link.get_link_throughput(reset_activity=False) > self.beta:
+                # If the current link utilisation exceeds the maximum utilisation threshold, use the default cost
+                network_state.add_edge(link.terminal1.router_id, link.terminal2.router_id, cost=link.default_cost, active=link.active)
+                continue
+
+            # otherwise, attempt to modify the cost
+            id2 = network_state.nodes[link.terminal2.router_id]['id_']
+
+            if id2 % 2 == 0:
+                link_cost = self.adjust_cost(link.default_cost, -self.alpha) # negative alpha
+            else:
+                link_cost = self.adjust_cost(link.default_cost, self.alpha)  # positive alpha
+
+            network_state.add_edge(link.terminal1.router_id, link.terminal2.router_id, cost=link_cost, active=link.active)
+        
+        return network_state
+
+    # def get_active_network_state(self):
+    #     """Create a map of the current network state, using only active links.
+
+    #     Returns:
+    #         nx.Graph: graph representing the active network state
+    #     """
+    #     graph = super().get_active_network_state()
+    #     for node in self.nodes:
+    #         if not node.active and node.router_id in graph.nodes:
+    #             graph.remove_node(node.router_id)
+    #     return graph
+
+    def adjust_cost(self, cost, alpha):
+        """Adjust the cost of a link based on the overall traffic history"""
+
+        # Take the last lookback number of traffic rates
+        traffic_rate = [i for i in self.utilisation_record[-self.lookback:]]
+
+        x = range(len(traffic_rate))
+        y = traffic_rate
+        n = len(x)
+
+        if n == 0:
+            return cost
+
+        x_mean = sum(x) / n
+        y_mean = sum(y) / n
+        try:
+            slr = sum([(x[i] - x_mean) * (y[i] - y_mean) for i in range(n)]) / sum([(x[i] - x_mean)**2 for i in range(n)])
+            return cost + alpha * slr
+        except ZeroDivisionError:
+            return cost
+
+    def update_nodes_states(self):
+        """Iterate through all nodes in the network to update sleep status."""
+        for node in self.nodes:
+            node.update_router_status()
+            node.sync_lsdb(self.get_active_network_state())
+
+    async def monitor(self, interval=1):
+        while True:
+            self.update_nodes_states()
+            self.utilisation_record.append(self.get_total_utilisation(reset_activity=False))
+            self.energy_record.append(self.get_total_energy())
+            self.drop_record.append(self.get_dropped_packets())
+            await asyncio.sleep(interval)
+
+    def get_total_utilisation(self, reset_activity=True):
+        """Get total utilisation of the network by summing the utilisation of all links.
+
+        Args:
+            reset_activity (bool, optional): Whether to reset the throughput tracking after getting throughput. Defaults to True.
+
+        Returns:
+            float: total utilisation
+        """
+        total_throughput = 0
+        active_graph = self.get_network_state()
+        count = 0
+        for link in self.links:
+            if (link.terminal1.router_id, link.terminal2.router_id) in active_graph.edges:
+                total_throughput += link.get_link_throughput(reset_activity) / link.bandwidth
+                count += 1
+        return total_throughput / count
+
+
+    def calculate_router_energy(self):
+        """Get total energy consumption of all routers in the network.
+
+        Returns:
+            int: total energy consumption of all routers
+        """
+        sum_ = 0
+        for node in self.nodes:
+            sum_ += self.active_router_constant * node.active
+            sum_ += self.router_switch_constant * node.get_status_switches()
+        return sum_
+    
+    def get_total_energy(self, reset_activity=True):
+        """Get the total energy consumption of the whole network.
+
+        Args:
+            reset_activity (bool, optional): Whether to reset tracking of throughput after getting. Defaults to True.
+
+        Returns:
+            float: energy consumption of the network
+        """
+        self.update_interface_states()
+        throughput_energy = self.throughput_energy_constant * self.get_total_throughput(reset_activity)
+        interface_energy = self.calculate_interface_energy()
+        router_energy = self.calculate_router_energy()
+        return throughput_energy + interface_energy + router_energy

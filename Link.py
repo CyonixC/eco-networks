@@ -1,6 +1,7 @@
 import time
 # import asyncio
 import random
+import queue
 
 class Link:
     def __init__(self, bandwidth, delay = 0, loss_rate = 0) -> None:
@@ -176,3 +177,17 @@ class Link:
         receiving_router.receive(packet, receiving_interface)
 
         return True
+
+class EcoRPLink(Link):
+    def __init__(self, bandwidth, beta = 0.8, delay=0, loss_rate=0) -> None:
+        """Class for handling EcoRP links. This will individually track usage and traffic trends.
+
+        Args:
+            bandwidth (int): link capacity in bits per second
+            delay (int, optional): delay, not used. Defaults to 0.
+            loss_rate (int, optional): loss rate of link, not used. Defaults to 0.
+        """
+        super().__init__(bandwidth, delay, loss_rate)
+        self.default_cost = 1000_000 / bandwidth
+        self.beta = beta
+    
